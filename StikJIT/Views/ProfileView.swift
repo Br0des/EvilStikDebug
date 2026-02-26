@@ -20,7 +20,8 @@ class Profile: ObservableObject {
     @Published var uuid: String
     @Published var expirationDate: Date? = nil
     @Published var plistDict: [String:Any]? = nil
-    
+    var decodeError: String? = nil
+
     init(data: Data) {
         self.data = data
         do {
@@ -38,8 +39,7 @@ class Profile: ObservableObject {
                 self.uuid = UUID().uuidString
             }
         } catch {
-            appName = "Failed to decode this profile."
-            appId = error.localizedDescription
+            self.decodeError = error.localizedDescription
             uuid = UUID().uuidString
         }
     }
@@ -120,85 +120,119 @@ struct ProfileView: View {
     @State private var exportDoc = ProfileDocument()
     @State private var isImporterPresented = false
     
-    @State private var searchText = ""
     @State private var alert = false
     @State private var alertTitle = ""
     @State private var alertMsg = ""
     @State private var alertSuccess = false
-    
-    @State private var profiles: [Profile] = []
+    @State private var entries: [AppProfileStatus] = []
+    @State private var expandedApps: Set<String> = []
+    @State private var notMatchedProfiles: [AppProfileStatus] = []
+
     @State private var confirmRemove = false
     @State private var removeTargetName: String = ""
     @State private var removeTargetUUID: String = ""
-    @State private var expandedAppIds: Set<String> = []
     
-    // Computed property to group profiles by appId and sort by expiration date
-    private var groupedProfiles: [String: [Profile]] {
-        Dictionary(grouping: profiles, by: { $0.appId })
-            .mapValues { profiles in
-                profiles.sorted { profile1, profile2 in
-                    // Sort by expiration date descending (latest first)
-                    guard let date1 = profile1.expirationDate else { return false }
-                    guard let date2 = profile2.expirationDate else { return true }
-                    return date1 > date2
-                }
-            }
-    }
-    
-    private var sortedAppIds: [String] {
-        groupedProfiles.keys.sorted()
-    }
-    
-    
-    @AppStorage("customAccentColor") private var customAccentColorHex: String = ""
-    @AppStorage("appTheme") private var appThemeRaw: String = AppTheme.system.rawValue
-    @Environment(\.themeExpansionManager) private var themeExpansion
-    private var backgroundStyle: BackgroundStyle { themeExpansion?.backgroundStyle(for: appThemeRaw) ?? AppTheme.system.backgroundStyle }
-    private var preferredScheme: ColorScheme? { themeExpansion?.preferredColorScheme(for: appThemeRaw) }
-    private var accentColor: Color { themeExpansion?.resolvedAccentColor(from: customAccentColorHex) ?? .blue }
     
     var body: some View {
         NavigationStack {
-            ZStack {
-                ThemedBackground(style: backgroundStyle)
-                    .ignoresSafeArea()
-                
-                ScrollView {
-                    VStack(spacing: 20) {
-                        infoCard
+            List {
+                if working && entries.isEmpty {
+                    Section {
+                        HStack {
+                            Spacer()
+                            ProgressView("Loading...")
+                            Spacer()
+                        }
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 30)
+                } else if entries.isEmpty && notMatchedProfiles.isEmpty {
+                    Section {
+                        Text("No profiles found.")
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 
-                if alert {
-                    CustomErrorView(title: alertTitle,
-                                    message: alertMsg,
-                                    onDismiss: { alert = false },
-                                    messageType: alertSuccess ? .success : .error)
+                ForEach(entries) { entry in
+                    Section {
+                        // Header/Status Row
+                        VStack(alignment: .leading, spacing: 4) {
+                            if let match = entry.bestMatchingProfile {
+                                HStack {
+                                    Image(systemName: "clock")
+                                    Text("Expires: \(match.profile.formattedDate)")
+                                }
+                                .foregroundStyle(match.profile.dateColor)
+                                .font(.subheadline)
+                            } else {
+                                HStack {
+                                    Image(systemName: "exclamationmark.triangle")
+                                    Text("No matching profile")
+                                }
+                                .font(.subheadline)
+                                .foregroundColor(.refreshRed)
+                            }
+                            
+                            Text(entry.id)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        
+                        // Profiles
+                        if let recent = entry.mostRecentProfile {
+                            profileRow(match: recent, isMostRecent: true)
+                        }
+                        
+                        if let best = entry.bestMatchingProfile, best.profile.uuid != entry.mostRecentProfile?.profile.uuid {
+                            profileRow(match: best, isMostRecent: false)
+                        }
+                        
+                        if entry.profileMatches.count > 1 {
+                            let showMore = expandedApps.contains(entry.id)
+                            let extraProfiles = entry.profileMatches.dropFirst(recentAndBestCount(for: entry))
+                            
+                            if !extraProfiles.isEmpty {
+                                if showMore {
+                                    ForEach(extraProfiles, id: \.profile.uuid) { match in
+                                        profileRow(match: match, isMostRecent: false)
+                                    }
+                                }
+                                
+                                Button {
+                                    withAnimation {
+                                        if showMore { expandedApps.remove(entry.id) }
+                                        else { expandedApps.insert(entry.id) }
+                                    }
+                                } label: {
+                                    Label(showMore ? "Hide older profiles" : "Show \(extraProfiles.count) older profiles",
+                                          systemImage: showMore ? "chevron.up" : "chevron.down")
+                                        .font(.caption)
+                                        .foregroundStyle(.blue)
+                                }
+                            }
+                        }
+                    } header: {
+                        Text(entry.name)
+                    }
                 }
                 
-                if confirmRemove {
-                    CustomErrorView(
-                        title: "Confirm Removal",
-                        message: "Remove profile for \(removeTargetName) (UUID: \(removeTargetUUID))?\n**Apps associated with this profile may become unavailable.**",
-                        onDismiss: { confirmRemove = false },
-                        showButton: true,
-                        primaryButtonText: "Remove",
-                        secondaryButtonText: "Cancel",
-                        onPrimaryButtonTap: {
-                            Task { await removeProfile(uuid: removeTargetUUID) }
-                        },
-                        onSecondaryButtonTap: {
-                            // Just dismiss
-                        },
-                        showSecondaryButton: true,
-                        messageType: .info
-                    )
+                if !notMatchedProfiles.isEmpty {
+                    Section("Other Profiles") {
+                        ForEach(notMatchedProfiles) { entry in
+                            VStack(alignment: .leading) {
+                                Text(entry.id)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.primary)
+                            }
+                            
+                            ForEach(entry.profileMatches, id: \.profile.uuid) { match in
+                                profileRow(match: match, isMostRecent: false)
+                            }
+                        }
+                    }
                 }
-                
             }
-            .navigationTitle("Profiles")
+            .listStyle(.insetGrouped)
+            .navigationTitle("App Expiry")
             .toolbar {
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
                     Button {
@@ -208,15 +242,14 @@ struct ProfileView: View {
                     }
                     
                     Button {
-                        Task {await loadProfiles()}
+                        Task { await loadData(force: true) }
                     } label: {
                         Label("Reload", systemImage: "arrow.clockwise")
                     }
                     
                 }
             }
-            
-            .onAppear { Task { await loadProfiles() } }
+            .onAppear { Task { await loadData() } }
             .fileImporter(
                 isPresented: $isImporterPresented,
                 allowedContentTypes: [UTType(filenameExtension: "mobileprovision")!],
@@ -238,99 +271,19 @@ struct ProfileView: View {
                 }
             }
         }
-        .preferredColorScheme(preferredScheme)
-    }
-    
-    // MARK: - UI Sections
-    
-    private var infoCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            
-            if profiles.isEmpty {
-                Text(working ? "Loading Profiles" : "No profile available")
-            } else {
-                ForEach(sortedAppIds, id: \.self) { appId in
-                    if let appProfiles = groupedProfiles[appId] {
-                        VStack(alignment: .leading, spacing: 8) {
-                            // App ID header with expand/collapse control
-                            HStack {
-                                Text(appId)
-                                    .font(.headline)
-                                    .foregroundColor(.primary)
-                                Spacer()
-                                if appProfiles.count > 1 {
-                                    Button {
-                                        withAnimation(.easeInOut(duration: 0.3)) {
-                                            if expandedAppIds.contains(appId) {
-                                                expandedAppIds.remove(appId)
-                                            } else {
-                                                expandedAppIds.insert(appId)
-                                            }
-                                        }
-                                    } label: {
-                                        HStack(spacing: 4) {
-                                            Image(systemName: expandedAppIds.contains(appId) ? "chevron.up" : "chevron.down")
-                                        }
-                                    }
-                                }
-                            }
-                            .padding(.top, appId != sortedAppIds.first ? 8 : 0)
-                            
-                            // Profiles for this app (only first if collapsed)
-                            let displayProfiles: [Profile] = expandedAppIds.contains(appId) ? appProfiles : Array(appProfiles.prefix(1))
-                            ForEach(Array(displayProfiles.enumerated()), id: \.element.uuid) { pair in
-                                let index = pair.offset
-                                let entry = pair.element
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        Text(entry.appName).bold()
-                                        Text(entry.uuid).lineLimit(1)
-                                        Text("Expires: \(entry.formattedDate)")
-                                            .foregroundStyle(index == 0 ? entry.dateColor : Color.secondary)
-                                    }
-                                    .font(.caption.monospaced())
-                                    .foregroundColor(.secondary)
-                                    .textSelection(.enabled)
-                                    Spacer()
-                                    HStack(spacing: 10) {
-                                        profileActionButton(icon: "square.and.arrow.down", color: accentColor) {
-                                            saveProfile(profile: entry)
-                                        }
-                                        profileActionButton(icon: "trash", color: .refreshRed) {
-                                            removeProfilePrompt(entry: entry)
-                                        }
-                                    }
-                                }
-                                .padding(.vertical, 4)
-                                .transition(.opacity.combined(with: .move(edge: .top)))
-                                if entry.uuid != displayProfiles.last?.uuid {
-                                    Divider().background(Color.white.opacity(0.08))
-                                }
-                            }
-                            .animation(.easeInOut(duration: 0.3), value: expandedAppIds)
-                        }
-                        
-                        // Divider between app groups
-                        if appId != sortedAppIds.last {
-                            Divider()
-                                .background(Color.white.opacity(0.12))
-                                .padding(.vertical, 4)
-                        }
-                    }
-                }
-            }
+                .alert(alertTitle, isPresented: $alert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(alertMsg)
         }
-        .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.15), lineWidth: 1)
-                )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .shadow(color: .black.opacity(0.15), radius: 12, x: 0, y: 4)
+        .alert("Confirm Removal", isPresented: $confirmRemove) {
+            Button("Remove", role: .destructive) {
+                Task { await removeProfile(uuid: removeTargetUUID) }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Remove profile for \(removeTargetName) (UUID: \(removeTargetUUID))?\nApps associated with this profile may become unavailable.")
+        }
     }
     
     private func profileActionButton(icon: String, color: Color, action: @escaping () -> Void) -> some View {
@@ -342,32 +295,244 @@ struct ProfileView: View {
         .buttonStyle(.borderless)
     }
     
-    private func removeProfilePrompt(entry: Profile) {
-        removeTargetName = entry.appName
-        removeTargetUUID = entry.uuid
-        confirmRemove = true
+    private func recentAndBestCount(for entry: AppProfileStatus) -> Int {
+        let distinctBest : Int
+        if let bestMatchingProfile = entry.bestMatchingProfile, let recent = entry.mostRecentProfile {
+            distinctBest = (bestMatchingProfile.profile.uuid != recent.profile.uuid) ? 1 : 0
+        } else {
+            distinctBest = 0
+        }
+        
+        return 1 + distinctBest
     }
     
-    func loadProfiles() async {
+    private func profileRow(match: ProfileMatch, isMostRecent: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(isMostRecent ? "Most Recent Profile" : "Profile")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.primary)
+                Spacer()
+                Text(match.profile.formattedDate)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(match.profile.dateColor)
+            }
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(match.profile.appName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("UUID: \(match.profile.uuid)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                Spacer()
+                HStack(spacing: 16) {
+                    profileActionButton(icon: "square.and.arrow.down", color: .blue) {
+                        saveProfile(profile: match.profile)
+                    }
+                    profileActionButton(icon: "trash", color: .refreshRed) {
+                        removeProfilePrompt(entry: match.profile)
+                    }
+                }
+            }
+            if !match.missingEntitlements.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Missing entitlements:")
+                        .font(.caption)
+                        .foregroundColor(.refreshRed)
+                    ForEach(Array(formattedMissingLines(from: match.missingEntitlements).enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.caption.monospaced())
+                            .foregroundColor(.refreshRed)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+    
+    // MARK: - Data loading
+    
+    private func loadData(force: Bool = false) async {
+        if !force, !entries.isEmpty {
+            working = false
+            return
+        }
         await MainActor.run { working = true }
         do {
-            let profileDatas = try await Task.detached(priority: .userInitiated) {
-                try JITEnableContext.shared.fetchAllProfiles()
+            let (profiles, apps) = try await Task.detached(priority: .userInitiated) { () throws -> ([Profile], [SideloadedApp]) in
+                let profileDatas = try JITEnableContext.shared.fetchAllProfiles()
+                let parsedProfiles = profileDatas.map { Profile(data: $0) }
+                let rawApps = try JITEnableContext.shared.getSideloadedApps()
+                let parsedApps = rawApps.compactMap { item -> SideloadedApp? in
+                    guard let dict = item as? [String: Any] else { return nil }
+                    return SideloadedApp(dictionary: dict)
+                }
+                return (parsedProfiles, parsedApps)
             }.value
-            let parsedProfiles = profileDatas.map { Profile(data: $0) }
+
+            let failedProfiles = profiles.filter { $0.decodeError != nil }
+            let validProfiles = profiles.filter { $0.decodeError == nil }
+
+            if !failedProfiles.isEmpty {
+                let errors = failedProfiles.map { $0.decodeError ?? "Unknown error" }
+                let uniqueErrors = Array(Set(errors))
+                await MainActor.run {
+                    alertTitle = "Failed to Decode \(failedProfiles.count) Profile\(failedProfiles.count == 1 ? "" : "s")"
+                    alertMsg = uniqueErrors.joined(separator: "\n")
+                    alert = true
+                }
+            }
+
+            let groupedProfiles = Dictionary(grouping: validProfiles) { profileIdentifier(from: $0) }
+                .mapValues { profiles in
+                    profiles.sorted { lhs, rhs in
+                        let leftDate = lhs.expirationDate ?? .distantPast
+                        let rightDate = rhs.expirationDate ?? .distantPast
+                        return leftDate > rightDate
+                    }
+                }
+            
+            let wildcardGroups = groupedProfiles.filter { $0.key.contains("*") }
+            let appsSorted = apps.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            let computedEntries = appsSorted.map { app in
+                let matches = profileMatches(for: app, groupedProfiles: groupedProfiles, wildcardProfiles: wildcardGroups)
+                return AppProfileStatus(app: app, profileMatches: matches)
+            }
+            
+            let appIds = apps.compactMap { $0.applicationIdentifier }
+            notMatchedProfiles = groupedProfiles
+                .filter { !appIds.contains($0.key) }
+                .map { appId, profiles in
+                    AppProfileStatus(appId: appId, profiles: profiles)
+                }
+            
             await MainActor.run {
-                self.profiles = parsedProfiles
+                self.entries = computedEntries
                 self.working = false
             }
         } catch {
             await MainActor.run {
+                alertTitle = "Failed to load"
                 alertMsg = error.localizedDescription
-                alertTitle = "Failed to Fetch Profiles"
                 alertSuccess = false
                 alert = true
                 working = false
             }
         }
+    }
+    
+    
+    private func profileMatches(for app: SideloadedApp, groupedProfiles: [String: [Profile]], wildcardProfiles: [String: [Profile]]) -> [ProfileMatch] {
+        let targetIdentifier = app.applicationIdentifier ?? app.bundleId
+        var collected: [Profile] = []
+        if let direct = groupedProfiles[targetIdentifier] {
+            collected.append(contentsOf: direct)
+        }
+        if targetIdentifier != app.bundleId, let bundleMatches = groupedProfiles[app.bundleId] {
+            collected.append(contentsOf: bundleMatches)
+        }
+        for (pattern, profiles) in wildcardProfiles {
+            if wildcardMatch(pattern, value: targetIdentifier) || wildcardMatch(pattern, value: app.bundleId) {
+                collected.append(contentsOf: profiles)
+            }
+        }
+        var seen = Set<String>()
+        let uniqueProfiles = collected.filter { profile in
+            guard !profile.uuid.isEmpty else { return false }
+            let inserted = seen.insert(profile.uuid).inserted
+            return inserted
+        }
+        let matches = uniqueProfiles.map { profile -> ProfileMatch in
+            let profileEntitlements = entitlements(from: profile)
+            let missing = missingEntitlements(appEntitlements: app.entitlements, profileEntitlements: profileEntitlements)
+            return ProfileMatch(profile: profile, missingEntitlements: missing)
+        }
+        return matches.sorted { lhs, rhs in
+            let leftDate = lhs.profile.expirationDate ?? .distantPast
+            let rightDate = rhs.profile.expirationDate ?? .distantPast
+            return leftDate > rightDate
+        }
+    }
+    
+    // MARK: - Entitlement helpers
+    
+    private func profileIdentifier(from profile: Profile) -> String {
+        entitlements(from: profile)["application-identifier"] as? String ?? profile.appId
+    }
+    
+    private func entitlements(from profile: Profile) -> [String: Any] {
+        profile.plistDict?["Entitlements"] as? [String: Any] ?? [:]
+    }
+    
+    private func missingEntitlements(appEntitlements: [String: Any], profileEntitlements: [String: Any]) -> [MissingNode] {
+        var missing: [MissingNode] = []
+        for (key, appValue) in appEntitlements {
+            guard let profileValue = profileEntitlements[key] else {
+                missing.append(MissingNode(name: key, children: []))
+                continue
+            }
+            if let node = diffEntitlement(name: key, appValue: appValue, profileValue: profileValue) {
+                missing.append(node)
+            }
+        }
+        return missing.sorted { $0.name < $1.name }
+    }
+    
+    private func diffEntitlement(name: String, appValue: Any, profileValue: Any) -> MissingNode? {
+        switch (profileValue, appValue) {
+        case let (p as String, a as String):
+            return wildcardMatch(p, value: a) ? nil : MissingNode(name: name, children: [])
+        case let (p as [Any], a as [Any]):
+            let aStrings = a.compactMap { normalizedString(from: $0) }
+            let pStrings = p.compactMap { normalizedString(from: $0) }
+            let missingValues = aStrings.filter { target in
+                !pStrings.contains(where: { wildcardMatch($0, value: target) })
+            }
+            guard !missingValues.isEmpty else { return nil }
+            let children = missingValues.map { MissingNode(name: $0, children: []) }
+            return MissingNode(name: name, children: children)
+        case let (p as [Any], a):
+            let aString = normalizedString(from: a)
+            let pStrings = p.compactMap { normalizedString(from: $0) }
+            if let aString, pStrings.contains(where: { wildcardMatch($0, value: aString) }) {
+                return nil
+            }
+            return MissingNode(name: name, children: aString.map { [MissingNode(name: $0, children: [])] } ?? [])
+        case let (p as [String: Any], a as [String: Any]):
+            let childMissing = missingEntitlements(appEntitlements: a, profileEntitlements: p)
+            return childMissing.isEmpty ? nil : MissingNode(name: name, children: childMissing)
+        case let (p as NSNumber, a as NSNumber):
+            return p == a ? nil : MissingNode(name: name, children: [])
+        case let (p as Bool, a as Bool):
+            return p == a ? nil : MissingNode(name: name, children: [])
+        default:
+            if let pObj = profileValue as? NSObject, let aObj = appValue as? NSObject, pObj == aObj {
+                return nil
+            }
+            return MissingNode(name: name, children: [])
+        }
+    }
+    
+    private func wildcardMatch(_ pattern: String, value: String) -> Bool {
+        let escaped = NSRegularExpression.escapedPattern(for: pattern)
+            .replacingOccurrences(of: "\\*", with: ".*")
+        let regex = "^" + escaped + "$"
+        return value.range(of: regex, options: .regularExpression) != nil
+    }
+    
+    private func normalizedString(from value: Any) -> String? {
+        if let str = value as? String { return str }
+        if let num = value as? NSNumber { return num.stringValue }
+        return nil
+    }
+    
+    private func removeProfilePrompt(entry: Profile) {
+        removeTargetName = entry.appName
+        removeTargetUUID = entry.uuid
+        confirmRemove = true
     }
     
     func saveProfile(profile: Profile) {
@@ -385,7 +550,7 @@ struct ProfileView: View {
             alertSuccess = true
             alert = true
             // Reload profiles after removal
-            await loadProfiles()
+            await loadData(force: true)
         } catch {
             alertMsg = error.localizedDescription
             alertTitle = "Failed to Remove Profile"
@@ -420,7 +585,7 @@ struct ProfileView: View {
             alert = true
             
             // Reload profiles after adding
-            await loadProfiles()
+            await loadData(force: true)
         } catch {
             alertMsg = error.localizedDescription
             alertTitle = "Failed to Add Profile"
@@ -429,5 +594,90 @@ struct ProfileView: View {
         }
         working = false
     }
+}
+
+private struct MissingNode: Identifiable {
+    let id = UUID()
+    let name: String
+    let children: [MissingNode]
+}
+
+private func formattedMissingLines(from nodes: [MissingNode]) -> [String] {
+    var lines: [String] = []
+    for node in nodes {
+        lines.append(node.name)
+        lines.append(contentsOf: formattedMissingChildren(node.children, indentLevel: 1))
+    }
+    return lines
+}
+
+private func formattedMissingChildren(_ children: [MissingNode], indentLevel: Int) -> [String] {
+    var lines: [String] = []
+    let prefix = String(repeating: "  ", count: max(indentLevel - 1, 0)) + "┗ "
+    for child in children {
+        lines.append(prefix + child.name)
+        lines.append(contentsOf: formattedMissingChildren(child.children, indentLevel: indentLevel + 1))
+    }
+    return lines
+}
+
+private struct SideloadedApp: Identifiable {
+    let id: String
+    let name: String
+    let bundleId: String
+    let entitlements: [String: Any]
     
+    var applicationIdentifier: String? {
+        entitlements["application-identifier"] as? String
+    }
+    
+    init?(dictionary: [String: Any]) {
+        guard let bundleId = dictionary["CFBundleIdentifier"] as? String else { return nil }
+        self.bundleId = bundleId
+        self.id = bundleId
+        let displayName = dictionary["CFBundleDisplayName"] as? String
+        let name = dictionary["CFBundleName"] as? String
+        self.name = displayName ?? name ?? bundleId
+        self.entitlements = dictionary["Entitlements"] as? [String: Any] ?? [:]
+    }
+}
+
+private struct ProfileMatch: Identifiable {
+    let id: String
+    let profile: Profile
+    let missingEntitlements: [MissingNode]
+    
+    init(profile: Profile, missingEntitlements: [MissingNode]) {
+        self.id = profile.uuid
+        self.profile = profile
+        self.missingEntitlements = missingEntitlements
+    }
+}
+
+private struct AppProfileStatus: Identifiable {
+    let id: String
+    let name: String
+    let bundleId: String
+    let entitlements: [String: Any]
+    let profileMatches: [ProfileMatch]
+    
+    var mostRecentProfile: ProfileMatch? { profileMatches.first }
+    var bestMatchingProfile: ProfileMatch? { profileMatches.first(where: { $0.missingEntitlements.isEmpty }) }
+    
+    init(app: SideloadedApp, profileMatches: [ProfileMatch]) {
+        self.id = app.id
+        self.name = app.name
+        self.bundleId = app.bundleId
+        self.entitlements = app.entitlements
+        self.profileMatches = profileMatches
+
+    }
+    
+    init(appId: String, profiles:[Profile]) {
+        self.id = appId
+        self.name = "-"
+        self.bundleId = appId
+        self.profileMatches = profiles.map { ProfileMatch(profile: $0, missingEntitlements: []) }
+        self.entitlements = [:]
+    }
 }

@@ -8,18 +8,11 @@
 import Foundation
 
 enum DeviceConnectionContext {
-    static var isUsingExternalDevice: Bool {
-        DeviceLibraryStore.shared.isUsingExternalDevice
-    }
-    
-    static var requiresLoopbackVPN: Bool {
-        !isUsingExternalDevice
-    }
-    
     static var targetIPAddress: String {
-        if let device = DeviceLibraryStore.shared.activeDevice {
-            return device.ipAddress
+        let stored = UserDefaults.standard.string(forKey: "customTargetIP")
+        if let stored, !stored.isEmpty {
+            return stored
         }
-        return UserDefaults.standard.string(forKey: "TunnelDeviceIP") ?? "10.7.0.2"
+        return "10.7.0.1"
     }
 }

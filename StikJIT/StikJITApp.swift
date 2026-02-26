@@ -8,7 +8,6 @@
 import SwiftUI
 import Network
 import UniformTypeIdentifiers
-import NetworkExtension
 
 // Register default settings before the app starts
 private func registerAdvancedOptionsDefault() {
@@ -16,385 +15,9 @@ private func registerAdvancedOptionsDefault() {
     // Enable advanced options by default on iOS 19/26 and above
     let enabled = os.majorVersion >= 19
     UserDefaults.standard.register(defaults: ["enableAdvancedOptions": enabled])
-    UserDefaults.standard.register(defaults: ["enablePiP": enabled])
     UserDefaults.standard.register(defaults: [UserDefaults.Keys.txmOverride: false])
-}
-
-// MARK: - Welcome Sheet
-
-struct WelcomeSheetView: View {
-    var onDismiss: (() -> Void)?
-    @Environment(\.colorScheme) private var colorScheme
-    @AppStorage("customAccentColor") private var customAccentColorHex: String = ""
-    @Environment(\.themeExpansionManager) private var themeExpansion
-    
-    private var accent: Color {
-        themeExpansion?.resolvedAccentColor(from: customAccentColorHex) ?? .blue
-    }
-    
-    var body: some View {
-        ZStack {
-            // Background now comes from global BackgroundContainer
-            Color.clear.ignoresSafeArea()
-            
-            ScrollView {
-                VStack(spacing: 20) {
-                    // Card container with glassy material and stroke
-                    VStack(alignment: .leading, spacing: 16) {
-                        // Title
-                        Text("Welcome!")
-                            .font(.system(.largeTitle, design: .rounded).weight(.bold))
-                            .foregroundColor(.primary)
-                            .padding(.top, 8)
-                        
-                        // Intro
-                        Text("Thanks for installing the app. This brief introduction will help you get started.")
-                            .font(.body)
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.leading)
-                        
-                        // App description
-                        VStack(alignment: .leading, spacing: 6) {
-                            Label("On‑device debugger", systemImage: "bolt.shield.fill")
-                                .foregroundColor(accent)
-                                .font(.headline)
-                            Text("StikDebug is an on‑device debugger designed specifically for self‑developed apps. It helps streamline testing and troubleshooting without sending any data to external servers.")
-                                .font(.callout)
-                                .foregroundColor(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        
-                        // VPN explanation
-                        VStack(alignment: .leading, spacing: 6) {
-                            Label("Why VPN permission?", systemImage: "lock.shield.fill")
-                                .foregroundColor(accent)
-                                .font(.headline)
-                            Text("The next step will prompt you to allow VPN permissions. This is necessary for the app to function properly. The VPN configuration allows your device to securely connect to itself — nothing more. No data is collected or sent externally; everything stays on your device.")
-                                .font(.callout)
-                                .foregroundColor(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        
-                        // Continue button
-                        Button(action: { onDismiss?() }) {
-                            Text("Continue")
-                                .font(.system(size: 16, weight: .semibold, design: .rounded))
-                                .foregroundColor(accent.contrastText())
-                                .frame(height: 44)
-                                .frame(maxWidth: .infinity)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .fill(accent)
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .stroke(Color.primary.opacity(0.15), lineWidth: 1)
-                                )
-                        }
-                        .padding(.top, 8)
-                        .accessibilityIdentifier("welcome_continue_button")
-                    }
-                    .padding(20)
-                    .background(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(.ultraThinMaterial)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                    .strokeBorder(Color.primary.opacity(0.15), lineWidth: 1)
-                            )
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    .shadow(color: .black.opacity(colorScheme == .dark ? 0.15 : 0.08), radius: 12, x: 0, y: 4)
-                    
-                    // Footer version info for consistency
-                    HStack {
-                        Spacer()
-                        Text("iOS \(UIDevice.current.systemVersion)")
-                            .font(.footnote)
-                            .foregroundColor(.secondary)
-                        Spacer()
-                    }
-                    .padding(.top, 6)
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 30)
-            }
-        }
-        // Inherit preferredColorScheme from BackgroundContainer (no local override)
-    }
-}
-
-// MARK: - VPN Logger
-
-class VPNLogger: ObservableObject {
-    @Published var logs: [String] = []
-    static var shared = VPNLogger()
-    private init() {}
-    
-    func log(_ message: Any, file: String = #file, function: String = #function, line: Int = #line) {
-        #if DEBUG
-        let fileName = (file as NSString).lastPathComponent
-        print("[\(fileName):\(line)] \(function): \(message)")
-        #endif
-        logs.append("\(message)")
-    }
-}
-
-// MARK: - Tunnel Manager
-
-class TunnelManager: ObservableObject {
-    @Published var tunnelStatus: TunnelStatus = .disconnected
-    static var shared = TunnelManager()
-    
-    private var vpnManager: NETunnelProviderManager?
-    private var pendingStopRequest = false
-    private var tunnelDeviceIp: String {
-        UserDefaults.standard.string(forKey: "TunnelDeviceIP") ?? "10.7.0.0"
-    }
-    private var tunnelFakeIp: String {
-        UserDefaults.standard.string(forKey: "TunnelFakeIP") ?? "10.7.0.1"
-    }
-    private var tunnelSubnetMask: String {
-        UserDefaults.standard.string(forKey: "TunnelSubnetMask") ?? "255.255.255.0"
-    }
-    private var tunnelBundleId: String {
-        Bundle.main.bundleIdentifier!.appending(".TunnelProv")
-    }
-    
-    enum TunnelStatus: String {
-        case disconnected = "Disconnected"
-        case connecting = "Connecting"
-        case connected = "Connected"
-        case disconnecting = "Disconnecting"
-        case error = "Error"
-    }
-    
-    private init() {
-        loadTunnelPreferences()
-        NotificationCenter.default.addObserver(self, selector: #selector(statusDidChange(_:)), name: .NEVPNStatusDidChange, object: nil)
-    }
-    
-    private func loadTunnelPreferences() {
-        NETunnelProviderManager.loadAllFromPreferences { [weak self] (managers, error) in
-            guard let self = self else { return }
-            DispatchQueue.main.async {
-                if let error = error {
-                    VPNLogger.shared.log("Error loading preferences: \(error.localizedDescription)")
-                    self.tunnelStatus = .error
-                    return
-                }
-                if let managers = managers, !managers.isEmpty {
-                    for manager in managers {
-                        if let proto = manager.protocolConfiguration as? NETunnelProviderProtocol,
-                           proto.providerBundleIdentifier == self.tunnelBundleId {
-                            self.vpnManager = manager
-                            self.updateTunnelStatus(from: manager.connection.status)
-                            VPNLogger.shared.log("Loaded existing tunnel configuration")
-                            break
-                        }
-                    }
-                    if self.vpnManager == nil, let firstManager = managers.first {
-                        self.vpnManager = firstManager
-                        self.updateTunnelStatus(from: firstManager.connection.status)
-                        VPNLogger.shared.log("Using existing tunnel configuration")
-                    }
-                    if self.pendingStopRequest, let manager = self.vpnManager {
-                        VPNLogger.shared.log("Pending stop request detected during preference load")
-                        self.stopVPN(with: manager)
-                    }
-                } else {
-                    VPNLogger.shared.log("No existing tunnel configuration found")
-                }
-            }
-        }
-    }
-    
-    @objc private func statusDidChange(_ notification: Notification) {
-        if let connection = notification.object as? NEVPNConnection {
-            updateTunnelStatus(from: connection.status)
-        }
-    }
-    
-    private func updateTunnelStatus(from connectionStatus: NEVPNStatus) {
-        DispatchQueue.main.async {
-            switch connectionStatus {
-            case .invalid, .disconnected:
-                self.tunnelStatus = .disconnected
-            case .connecting:
-                self.tunnelStatus = .connecting
-            case .connected:
-                self.tunnelStatus = .connected
-            case .disconnecting:
-                self.tunnelStatus = .disconnecting
-            case .reasserting:
-                self.tunnelStatus = .connecting
-            @unknown default:
-                self.tunnelStatus = .error
-            }
-            VPNLogger.shared.log("VPN status updated: \(self.tunnelStatus.rawValue)")
-            if connectionStatus == .connected && heartbeatStartPending {
-                startHeartbeatInBackground(showErrorUI: heartbeatPendingShowUI)
-            }
-        }
-    }
-    
-    private func createOrUpdateTunnelConfiguration(completion: @escaping (Bool) -> Void) {
-        NETunnelProviderManager.loadAllFromPreferences { [weak self] (managers, error) in
-            guard let self = self else { return completion(false) }
-            if let error = error {
-                VPNLogger.shared.log("Error loading preferences: \(error.localizedDescription)")
-                return completion(false)
-            }
-            
-            let manager: NETunnelProviderManager
-            if let existingManagers = managers, !existingManagers.isEmpty {
-                if let matchingManager = existingManagers.first(where: {
-                    ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == self.tunnelBundleId
-                }) {
-                    manager = matchingManager
-                    VPNLogger.shared.log("Updating existing tunnel configuration")
-                } else {
-                    manager = existingManagers[0]
-                    VPNLogger.shared.log("Using first available tunnel configuration")
-                }
-            } else {
-                manager = NETunnelProviderManager()
-                VPNLogger.shared.log("Creating new tunnel configuration")
-            }
-            
-            manager.localizedDescription = "StikDebug"
-            let proto = NETunnelProviderProtocol()
-            proto.providerBundleIdentifier = self.tunnelBundleId
-            proto.serverAddress = "StikDebug's Local Network Tunnel"
-            manager.protocolConfiguration = proto
-            manager.isOnDemandEnabled = true
-            manager.isEnabled = true
-            
-            manager.saveToPreferences { [weak self] error in
-                guard let self = self else { return completion(false) }
-                DispatchQueue.main.async {
-                    if let error = error {
-                        VPNLogger.shared.log("Error saving tunnel configuration: \(error.localizedDescription)")
-                        completion(false)
-                        return
-                    }
-                    self.vpnManager = manager
-                    VPNLogger.shared.log("Tunnel configuration saved successfully")
-                    completion(true)
-                }
-            }
-        }
-    }
-    
-    func startVPN() {
-        if let manager = vpnManager {
-            startExistingVPN(manager: manager)
-        } else {
-            createOrUpdateTunnelConfiguration { [weak self] success in
-                guard let self = self, success else { return }
-                self.loadTunnelPreferences()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    if let manager = self.vpnManager {
-                        self.startExistingVPN(manager: manager)
-                    }
-                }
-            }
-        }
-    }
-    
-    private func startExistingVPN(manager: NETunnelProviderManager) {
-        guard tunnelStatus == .disconnected || tunnelStatus == .error else {
-            VPNLogger.shared.log("Ignoring VPN start; current status: \(tunnelStatus.rawValue)")
-            return
-        }
-        tunnelStatus = .connecting
-        let options: [String: NSObject] = [
-            "TunnelDeviceIP": tunnelDeviceIp as NSObject,
-            "TunnelFakeIP": tunnelFakeIp as NSObject,
-            "TunnelSubnetMask": tunnelSubnetMask as NSObject
-        ]
-        do {
-            try manager.connection.startVPNTunnel(options: options)
-            VPNLogger.shared.log("Network tunnel start initiated")
-        } catch {
-            tunnelStatus = .error
-            VPNLogger.shared.log("Failed to start tunnel: \(error.localizedDescription)")
-        }
-    }
-    
-    func stopVPN() {
-        guard let manager = vpnManager else {
-            pendingStopRequest = true
-            loadTunnelPreferences()
-            return
-        }
-        pendingStopRequest = false
-        stopVPN(with: manager)
-    }
-    
-    private func stopVPN(with manager: NETunnelProviderManager) {
-        tunnelStatus = .disconnecting
-        manager.connection.stopVPNTunnel()
-        VPNLogger.shared.log("Network tunnel stop initiated")
-    }
-}
-
-// MARK: - AccentColor Environment Key (leave available but unused)
-
-struct AccentColorKey: EnvironmentKey {
-    static let defaultValue: Color = .accentColor
-}
-
-extension EnvironmentValues {
-    var accentColor: Color {
-        get { self[AccentColorKey.self] }
-        set { self[AccentColorKey.self] = newValue }
-    }
-}
-
-// MARK: - Helper Functions and Globals
-
-let fileManager = FileManager.default
-
-func httpGet(_ urlString: String, result: @escaping (String?) -> Void) {
-    if let url = URL(string: urlString) {
-        let task = URLSession.shared.dataTask(with: url) { data, response, error in
-            if let error = error {
-                print("Error: \(error.localizedDescription)")
-                result(nil)
-                return
-            }
-            
-            if let data = data, let httpResponse = response as? HTTPURLResponse {
-                if httpResponse.statusCode == 200 {
-                    print("Response: \(httpResponse.statusCode)")
-                    if let dataString = String(data: data, encoding: .utf8) {
-                        result(dataString)
-                    }
-                } else {
-                    print("Received non-200 status code: \(httpResponse.statusCode)")
-                }
-            }
-        }
-        task.resume()
-    }
-}
-
-func UpdateRetrieval() -> Bool {
-    var ver: String {
-        let marketingVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
-        return marketingVersion
-    }
-    let urlString = "https://raw.githubusercontent.com/0-Blu/StikJIT/refs/heads/main/version.txt"
-    var res = false
-    httpGet(urlString) { result in
-        if let fc = result {
-            if ver != fc {
-                res = true
-            }
-        }
-    }
-    return res
+    UserDefaults.standard.register(defaults: ["keepAliveAudio": true])
+    UserDefaults.standard.register(defaults: ["keepAliveLocation": true])
 }
 
 // MARK: - DNS Checker
@@ -429,19 +52,15 @@ class DNSChecker: ObservableObject {
                 group.notify(queue: .main) {
                     if self.controlIP == nil {
                         self.dnsError = "No internet connection."
-                        print("Control host lookup failed, so no internet connection.")
                     } else if self.appleIP == nil {
                         self.dnsError = "Apple DNS blocked. Your network might be filtering Apple traffic."
-                        print("Control lookup succeeded, but Apple lookup failed: likely blocked.")
                     } else {
                         self.dnsError = nil
-                        print("DNS lookups succeeded: Apple -> \(self.appleIP!), Control -> \(self.controlIP!)")
                     }
                 }
             } else {
                 DispatchQueue.main.async {
                     self.dnsError = nil
-                    print("Not connected to WiFi; continuing without DNS check.")
                 }
             }
         }
@@ -506,65 +125,20 @@ private var heartbeatPendingShowUI = true
 
 @main
 struct HeartbeatApp: App {
-    @AppStorage("hasLaunchedBefore") var hasLaunchedBefore: Bool = false
-    @AppStorage("customAccentColor") private var customAccentColorHex: String = ""
-    @AppStorage("appTheme") private var appThemeRaw: String = AppTheme.system.rawValue
-    @AppStorage("autoStartVPN") private var autoStartVPN = true
-    @State private var showWelcomeSheet: Bool = false
-    @State private var show_alert = false
-    @State private var alert_string = ""
-    @State private var alert_title = ""
     @StateObject private var mount = MountingProgress.shared
-    @StateObject private var themeExpansionManager = ThemeExpansionManager()
     @Environment(\.scenePhase) private var scenePhase   // Observe scene lifecycle
     @State private var shouldAttemptHeartbeatRestart = false
     
     init() {
         registerAdvancedOptionsDefault()
-        newVerCheck()
-        let fixMethod = class_getInstanceMethod(UIDocumentPickerViewController.self, #selector(UIDocumentPickerViewController.fix_init(forOpeningContentTypes:asCopy:)))!
-        let origMethod = class_getInstanceMethod(UIDocumentPickerViewController.self, #selector(UIDocumentPickerViewController.init(forOpeningContentTypes:asCopy:)))!
-        method_exchangeImplementations(origMethod, fixMethod)
+        if UserDefaults.standard.bool(forKey: "keepAliveAudio") {
+            BackgroundAudioManager.shared.start()
+        }
+        if let fixMethod  = class_getInstanceMethod(UIDocumentPickerViewController.self, #selector(UIDocumentPickerViewController.fix_init(forOpeningContentTypes:asCopy:))),
+           let origMethod = class_getInstanceMethod(UIDocumentPickerViewController.self, #selector(UIDocumentPickerViewController.init(forOpeningContentTypes:asCopy:))) {
+            method_exchangeImplementations(origMethod, fixMethod)
+        }
         
-        // Initialize UIKit tint from stored accent at launch (defaults to blue until entitlements load)
-        HeartbeatApp.updateUIKitTint(customHex: customAccentColorHex, hasAccess: false)
-    }
-    
-    // Make this static so we can call it without capturing self in init
-    private static func updateUIKitTint(customHex: String, hasAccess: Bool) {
-        let color: UIColor
-        if hasAccess, !customHex.isEmpty, let swiftColor = Color(hex: customHex) {
-            color = UIColor(swiftColor)
-        } else {
-            color = .systemBlue
-        }
-        UIView.appearance().tintColor = color
-    }
-    
-    func newVerCheck() {
-        let currentDate = Calendar.current.startOfDay(for: Date())
-        let VUA = UserDefaults.standard.object(forKey: "VersionUpdateAlert") as? Date ?? Date.distantPast
-        
-        if currentDate > Calendar.current.startOfDay(for: VUA) {
-            if UpdateRetrieval() {
-                alert_title = "Update Avaliable!"
-                let urlString = "https://raw.githubusercontent.com/0-Blu/StikJIT/refs/heads/main/version.txt"
-                httpGet(urlString) { result in
-                    if result == nil { return }
-                    alert_string = "Update to: version \(result!)!"
-                    show_alert = true
-                }
-            }
-            UserDefaults.standard.set(currentDate, forKey: "VersionUpdateAlert")
-        }
-    }
-    
-    private func triggerAutoVPNStartIfNeeded() {
-        guard autoStartVPN, DeviceConnectionContext.requiresLoopbackVPN else { return }
-        let manager = TunnelManager.shared
-        if manager.tunnelStatus == .disconnected || manager.tunnelStatus == .error {
-            manager.startVPN()
-        }
     }
     
     private func handleScenePhaseChange(_ newPhase: ScenePhase) {
@@ -581,80 +155,30 @@ struct HeartbeatApp: App {
         }
     }
     
-    private var globalAccent: Color {
-        themeExpansionManager.resolvedAccentColor(from: customAccentColorHex)
-    }
-    
     var body: some Scene {
         WindowGroup {
-            BackgroundContainer {
-                MainTabView()
-                    .onAppear {
-                        Task {
-                            let fileManager = FileManager.default
-                            for item in ddiDownloadItems {
-                                let destinationURL = URL.documentsDirectory.appendingPathComponent(item.relativePath)
-                                if fileManager.fileExists(atPath: destinationURL.path) { continue }
-                                do {
-                                    try await downloadFile(from: item.urlString, to: destinationURL)
-                                } catch {
-                                    await MainActor.run {
-                                        alert_title = "An Error has Occurred"
-                                        alert_string = "[Download DDI Error]: \(error.localizedDescription)"
-                                        show_alert = true
-                                    }
-                                    break
+            MainTabView()
+                .onAppear {
+                    Task {
+                        let fileManager = FileManager.default
+                        for item in ddiDownloadItems {
+                            let destinationURL = URL.documentsDirectory.appendingPathComponent(item.relativePath)
+                            if fileManager.fileExists(atPath: destinationURL.path) { continue }
+                            do {
+                                try await downloadFile(from: item.urlString, to: destinationURL)
+                            } catch {
+                                await MainActor.run {
+                                    showAlert(title: "An Error has Occurred",
+                                              message: "[Download DDI Error]: \(error.localizedDescription)",
+                                              showOk: true)
                                 }
+                                break
                             }
                         }
                     }
-                    .overlay(
-                        ZStack {
-                            if show_alert {
-                                CustomErrorView(
-                                    title: alert_title,
-                                    message: alert_string,
-                                    onDismiss: {
-                                        show_alert = false
-                                    },
-                                    showButton: true,
-                                    primaryButtonText: "OK"
-                                )
-                            }
-                        }
-                    )
-            }
-            .themeExpansionManager(themeExpansionManager)
-            // Apply global tint to all SwiftUI views in this window
-            .tint(globalAccent)
-            .onAppear {
-                // On first launch, present the welcome sheet.
-                // Otherwise, start the VPN automatically.
-                if !hasLaunchedBefore {
-                    showWelcomeSheet = true
-                } else {
-                    triggerAutoVPNStartIfNeeded()
                 }
-                HeartbeatApp.updateUIKitTint(customHex: customAccentColorHex,
-                                             hasAccess: themeExpansionManager.hasThemeExpansion)
-            }
-            .onChange(of: themeExpansionManager.hasThemeExpansion) { hasAccess in
-                HeartbeatApp.updateUIKitTint(customHex: customAccentColorHex, hasAccess: hasAccess)
-            }
-            .onChange(of: customAccentColorHex) { newHex in
-                HeartbeatApp.updateUIKitTint(customHex: newHex,
-                                             hasAccess: themeExpansionManager.hasThemeExpansion)
-            }
             .onChange(of: scenePhase) { newPhase in
                 handleScenePhaseChange(newPhase)
-            }
-            .sheet(isPresented: $showWelcomeSheet) {
-                WelcomeSheetView {
-                    // When the user taps "Continue", mark the app as launched and start the VPN if allowed.
-                    hasLaunchedBefore = true
-                    showWelcomeSheet = false
-                    triggerAutoVPNStartIfNeeded()
-                }
             }
         }
 
@@ -695,7 +219,6 @@ class MountingProgress: ObservableObject {
     
     func progressCallback(progress: size_t, total: size_t, context: UnsafeMutableRawPointer?) {
         let percentage = Double(progress) / Double(total) * 100.0
-        print("Mounting progress: \(percentage)%")
         DispatchQueue.main.async {
             self.mountProgress = percentage
         }
@@ -706,16 +229,6 @@ class MountingProgress: ObservableObject {
     }
     
     private func mount() {
-        if DeviceConnectionContext.requiresLoopbackVPN {
-            guard TunnelManager.shared.tunnelStatus == .connected else {
-                DispatchQueue.main.async {
-                    self.coolisMounted = false
-                    self.mountingThread = nil
-                }
-                return
-            }
-        }
-        
         let currentlyMounted = isMounted()
         DispatchQueue.main.async {
             self.coolisMounted = currentlyMounted
@@ -727,20 +240,18 @@ class MountingProgress: ObservableObject {
                 self.mountingThread = nil
             }
             
-            mountingThread = Thread { [weak self] in
+            let thread = Thread { [weak self] in
                 guard let self = self else { return }
-                let mountResult = mountPersonalDDI(
+                let mountError = mountPersonalDDI(
                     imagePath: URL.documentsDirectory.appendingPathComponent("DDI/Image.dmg").path,
                     trustcachePath: URL.documentsDirectory.appendingPathComponent("DDI/Image.dmg.trustcache").path,
                     manifestPath: URL.documentsDirectory.appendingPathComponent("DDI/BuildManifest.plist").path,
                 )
-                
+
                 DispatchQueue.main.async {
-                    if mountResult != 0 {
-                        showAlert(title: "Error", message: "An Error Occured when Mounting the DDI\nError Code: \(mountResult)", showOk: true, showTryAgain: true) { shouldTryAgain in
-                            if shouldTryAgain {
-                                self.mount()
-                            }
+                    if let mountError {
+                        showAlert(title: "DDI Mount Failed", message: mountError, showOk: true, showTryAgain: true) { shouldTryAgain in
+                            if shouldTryAgain { self.mount() }
                         }
                     } else {
                         self.coolisMounted = true
@@ -749,10 +260,10 @@ class MountingProgress: ObservableObject {
                     self.mountingThread = nil
                 }
             }
-            
-            mountingThread!.qualityOfService = .background
-            mountingThread!.name = "mounting"
-            mountingThread!.start()
+            thread.qualityOfService = .background
+            thread.name = "mounting"
+            thread.start()
+            mountingThread = thread
         }
     }
 }
@@ -761,35 +272,18 @@ func isPairing() -> Bool {
     let pairingpath = URL.documentsDirectory.appendingPathComponent("pairingFile.plist").path
     var pairingFile: IdevicePairingFile?
     let err = idevice_pairing_file_read(pairingpath, &pairingFile)
-    if let err {
-        print("Failed to read pairing file: \(err.pointee.code)")
-        if err.pointee.code == -9 {  // InvalidHostID is -9
-            return false
-        }
-        return false
-    }
+    if err != nil { return false }
     idevice_pairing_file_free(pairingFile)
     return true
 }
 
-func startHeartbeatInBackground(requireVPNConnection: Bool? = nil, showErrorUI: Bool = true) {
+func startHeartbeatInBackground(showErrorUI: Bool = true) {
     assert(Thread.isMainThread, "startHeartbeatInBackground must be called on the main thread")
     let pairingFileURL = URL.documentsDirectory.appendingPathComponent("pairingFile.plist")
     
     guard FileManager.default.fileExists(atPath: pairingFileURL.path) else {
         heartbeatStartPending = false
         heartbeatPendingShowUI = true
-        return
-    }
-    
-    let shouldRequireVPN = requireVPNConnection ?? DeviceConnectionContext.requiresLoopbackVPN
-    let vpnConnected = TunnelManager.shared.tunnelStatus == .connected
-    if shouldRequireVPN && !vpnConnected {
-        if !heartbeatStartPending {
-            print("Heartbeat start deferred until VPN connects")
-        }
-        heartbeatPendingShowUI = showErrorUI
-        heartbeatStartPending = true
         return
     }
     
@@ -809,7 +303,7 @@ func startHeartbeatInBackground(requireVPNConnection: Bool? = nil, showErrorUI: 
         }
         do {
             try JITEnableContext.shared.startHeartbeat()
-            print("Heartbeat started successfully")
+            LogManager.shared.addInfoLog("Heartbeat started successfully")
             pubHeartBeat = true
             
             DispatchQueue.main.async {
@@ -822,15 +316,15 @@ func startHeartbeatInBackground(requireVPNConnection: Bool? = nil, showErrorUI: 
         } catch {
             let err2 = error as NSError
             let code = err2.code
-            print("Error: \(error.localizedDescription) (Code: \(code))")
+            LogManager.shared.addErrorLog("\(error.localizedDescription) (Code: \(code))")
             guard showErrorUI else { return }
             DispatchQueue.main.async {
                 if code == -9 {
                     do {
                         try FileManager.default.removeItem(at: URL.documentsDirectory.appendingPathComponent("pairingFile.plist"))
-                        print("Removed invalid pairing file")
+                        LogManager.shared.addInfoLog("Removed invalid pairing file")
                     } catch {
-                        print("Error removing invalid pairing file: \(error)")
+                        LogManager.shared.addErrorLog("Failed to remove invalid pairing file: \(error.localizedDescription)")
                     }
                     
                     showAlert(
@@ -845,7 +339,7 @@ func startHeartbeatInBackground(requireVPNConnection: Bool? = nil, showErrorUI: 
                 } else {
                     showAlert(
                         title: "Heartbeat Error",
-                        message: "Failed to connect to Heartbeat (\(code)). Are you connected to WiFi or is Airplane Mode enabled? Cellular data isn’t supported. Please launch the app at least once with WiFi enabled. After that, you can switch to cellular data to turn on the VPN, and once the VPN is active you can use Airplane Mode.",
+                        message: "\(error.localizedDescription)\n\nMake sure Wi‑Fi and LocalDevVPN are connected and that the device is reachable.",
                         showOk: false,
                         showTryAgain: true
                     ) { shouldTryAgain in
@@ -863,7 +357,7 @@ func startHeartbeatInBackground(requireVPNConnection: Bool? = nil, showErrorUI: 
 
 }
 
-func checkVPNConnection(callback: @escaping (Bool, String?) -> Void) {
+func checkDeviceConnection(callback: @escaping (Bool, String?) -> Void) {
     let targetIP = DeviceConnectionContext.targetIPAddress
     let host = NWEndpoint.Host(targetIP)
     let port = NWEndpoint.Port(rawValue: 62078)!
@@ -875,12 +369,7 @@ func checkVPNConnection(callback: @escaping (Bool, String?) -> Void) {
             connection?.cancel()
             DispatchQueue.main.async {
                 if timeoutWorkItem?.isCancelled == false {
-                    let message: String
-                    if DeviceConnectionContext.requiresLoopbackVPN {
-                        message = "[TIMEOUT] The loopback VPN is not connected. Try closing this app, turn it off and back on."
-                    } else {
-                        message = "[TIMEOUT] Could not reach the device at \(targetIP). Make sure it’s online and on the same network."
-                    }
+                    let message = "[TIMEOUT] Could not reach the device at \(targetIP). Make sure it’s online and on the same network."
                     callback(false, message)
                 }
             }
@@ -899,18 +388,7 @@ func checkVPNConnection(callback: @escaping (Bool, String?) -> Void) {
             timeoutWorkItem?.cancel()
             connection?.cancel()
             DispatchQueue.main.async {
-                let message: String
-                if DeviceConnectionContext.requiresLoopbackVPN {
-                    if error == NWError.posix(.ETIMEDOUT) {
-                        message = "The loopback VPN is not connected. Try closing the app, turn it off and back on."
-                    } else if error == NWError.posix(.ECONNREFUSED) {
-                        message = "Wi-Fi is not connected. StikDebug can't connect over cellular data while in loopback mode."
-                    } else {
-                        message = "VPN check error: \(error.localizedDescription)"
-                    }
-                } else {
-                    message = "Could not reach the device at \(targetIP): \(error.localizedDescription)"
-                }
+                let message = "Could not reach the device at \(targetIP): \(error.localizedDescription)"
                 callback(false, message)
             }
         default:
@@ -924,70 +402,37 @@ func checkVPNConnection(callback: @escaping (Bool, String?) -> Void) {
     }
 }
 
-public func showAlert(title: String, message: String, showOk: Bool, showTryAgain: Bool = false, primaryButtonText: String? = nil, messageType: MessageType = .error, completion: ((Bool) -> Void)? = nil) {
+public func showAlert(title: String, message: String, showOk: Bool, showTryAgain: Bool = false, primaryButtonText: String? = nil, completion: ((Bool) -> Void)? = nil) {
     DispatchQueue.main.async {
-        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else {
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let rootViewController = scene.windows.first?.rootViewController else {
             return
         }
-        let rootViewController = scene.windows.first?.rootViewController
+        
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        
         if showTryAgain {
-            let customErrorView = CustomErrorView(
-                title: title,
-                message: message,
-                onDismiss: {
-                    rootViewController?.presentedViewController?.dismiss(animated: true)
-                    completion?(false)
-                },
-                showButton: true,
-                primaryButtonText: primaryButtonText ?? "Try Again",
-                onPrimaryButtonTap: {
-                    completion?(true)
-                },
-                messageType: messageType
-            )
-            let hostingController = UIHostingController(rootView: customErrorView)
-            hostingController.modalPresentationStyle = .overFullScreen
-            hostingController.modalTransitionStyle = .crossDissolve
-            hostingController.view.backgroundColor = .clear
-            rootViewController?.present(hostingController, animated: true)
+            alert.addAction(UIAlertAction(title: primaryButtonText ?? "Try Again", style: .default) { _ in
+                completion?(true)
+            })
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
+                completion?(false)
+            })
         } else if showOk {
-            let customErrorView = CustomErrorView(
-                title: title,
-                message: message,
-                onDismiss: {
-                    rootViewController?.presentedViewController?.dismiss(animated: true)
-                    completion?(true)
-                },
-                showButton: true,
-                primaryButtonText: primaryButtonText ?? "OK",
-                onPrimaryButtonTap: {
-                    rootViewController?.presentedViewController?.dismiss(animated: true)
-                    completion?(true)
-                },
-                messageType: messageType
-            )
-            let hostingController = UIHostingController(rootView: customErrorView)
-            hostingController.modalPresentationStyle = .overFullScreen
-            hostingController.modalTransitionStyle = .crossDissolve
-            hostingController.view.backgroundColor = .clear
-            rootViewController?.present(hostingController, animated: true)
+            alert.addAction(UIAlertAction(title: primaryButtonText ?? "OK", style: .default) { _ in
+                completion?(true)
+            })
         } else {
-            let customErrorView = CustomErrorView(
-                title: title,
-                message: message,
-                onDismiss: {
-                    rootViewController?.presentedViewController?.dismiss(animated: true)
-                    completion?(false)
-                },
-                showButton: false,
-                messageType: messageType
-            )
-            let hostingController = UIHostingController(rootView: customErrorView)
-            hostingController.modalPresentationStyle = .overFullScreen
-            hostingController.modalTransitionStyle = .crossDissolve
-            hostingController.view.backgroundColor = .clear
-            rootViewController?.present(hostingController, animated: true)
+             alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in
+                completion?(true)
+            })
         }
+        
+        var topController = rootViewController
+        while let presented = topController.presentedViewController {
+            topController = presented
+        }
+        topController.present(alert, animated: true)
     }
 }
 
